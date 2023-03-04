@@ -1,0 +1,177 @@
+---
+title: "Alpha Rules Analysis"
+output: html_notebook
+---
+
+## Preparations
+```{r}
+library(dplyr)
+library(tidyr)
+library(readr)
+library(arules)
+library(stringr)
+library(ggplot2)
+```
+
+## Diluting data
+Getting rid of known pathways that have too many reactions (keeping pathways with less than 50 reactions)
+```{r}
+#read the pathway and K0 data from kegg into our variable
+pathway_ko <- read_delim("C:/Users/yoavs/Desktop/Alpha/Research/links/pathway_ko.list", 
+     delim = "\t", escape_double = FALSE, 
+     col_names = FALSE, trim_ws = TRUE)
+#print out amount of rows
+message("amount of rows: ", nrow(pathway_ko))
+#remove "path:" and "ko:" from beginning of words, and also all paths that are marked by ko (we only need paths marked by map as they're duplicates of the ko paths) 
+pathway_ko <- pathway_ko %>%
+  #removing "path:" and "ko:"
+  mutate(pathway = gsub("path\\:", "", X1),
+         K0 = gsub("ko\\:", "", X2)) %>%
+  #select only the relevant columns (the new mutated ones) and filter out all rows that have "ko" still in them
+  select(pathway, K0) %>%
+  filter(!str_detect(pathway, "ko")) %>%
+  distinct() 
+#print the updated amount of rows for debugging purposes
+message("amount of updated rows: ", nrow(pathway_ko))
+#save all the "small" pathways, the ones where there's 100 or less K0's
+pathway_per_ko <- pathway_ko %>%
+  group_by(pathway) %>%
+  summarize(n_K0 = n()) %>%
+  filter(!str_detect(pathway, "01100")) %>%
+  filter(!str_detect(pathway, "01110")) %>%
+  filter(!str_detect(pathway, "01120")) %>%
+  filter(!str_detect(pathway, "01200")) %>%
+  filter(!str_detect(pathway, "01210")) %>%
+  filter(!str_detect(pathway, "01212")) %>%
+  filter(!str_detect(pathway, "01230")) %>%
+  filter(!str_detect(pathway, "01232")) %>%
+  filter(!str_detect(pathway, "01250")) %>%
+  filter(!str_detect(pathway, "01240")) %>%
+  filter(!str_detect(pathway, "01220")) 
+#read from file of gene_mappings to create matrix of all genomes and their individual K0's
+genome_kos <- read_csv("C:/Users/yoavs/Desktop/Alpha/Research/gene_mappings.csv")
+#filter out kos that dont exist and duplicate bacteria
+for_later <- genome_kos
+genome_kos<- genome_kos %>%
+  filter(!is.na(ko)) %>%
+  distinct(bac_name, ko, .keep_all = TRUE) %>%
+  select(genome, ko)
+#count amount of genomes per ko and get rid of kos that exist in too many genomes
+genome_per_ko <- genome_kos %>%
+  group_by(ko) %>%
+  summarize(n_genome = n())
+genome_per_ko_updated <- genome_per_ko %>%
+  filter(n_genome < n_distinct(genome_kos$genome) * 0.7)
+#join genome_kos and genome_per_ko_updated to retain only relevant rows
+genome_kos <- genome_kos %>%
+  left_join(genome_per_ko_updated, by = c("ko" = "ko")) 
+#filters out all irrelevant rows
+genome_kos <- genome_kos %>%
+  filter(!is.na(n_genome)) %>%
+  select(genome, ko)
+#add a column holding true so later when we pivot we'll have the knowledge of which reactions occur in which genome
+genome_kos <- genome_kos %>%
+  mutate(is_true = TRUE) 
+#pivot genome_kos, creating a much wider dataframe with over 8000 columns, that has genomes as row names, K0's as column names, and true/false if a K0 occurs in a genome
+genome_kos <- genome_kos %>%
+  pivot_wider(names_from = "ko", values_from = "is_true", values_fill = FALSE)
+#remove rownames and turn genome column into rownames
+genome_kos <- genome_kos %>% tibble::remove_rownames() %>%
+  tibble::column_to_rownames(var = "genome")
+
+```
+Reading rule files, selecting rules, adding rule ID's, splitting each K0 from within the rule into a different row with the pathway it is in (if any)
+```{r}
+#read rules files that I mined from before
+rules_found <- read_delim("C:/Users/yoavs/Desktop/Alpha/Analysis/rules_s0.45_c0.8.txt", 
+                         delim = "\t", escape_double = FALSE, 
+                         trim_ws = TRUE)
+rules_found <- rules_found %>%
+  mutate(items = gsub('\\{|\\}', '', items)) 
+#create dataframe that holds the rules (split into vectors of K0's without curly braces and commas), a rule ID for every rule, and the size of each rule. 
+rules <- rules_found %>% 
+  #select rules
+  select(items) %>%
+  #add rule_id value column
+  mutate(rule_id = row_number()) %>% 
+  #add rule_size column
+  mutate(rule_size = str_count(items, pattern = ",") + 1) %>%
+  #remove curly braces and commas
+  mutate(items = gsub('\\{|\\}', '', items)) 
+#rules_test seperates each vector of K0's into different columns (in accordance with the max size), pivots it longer so there's only a column for the different K0's, a rule ID and size for each. It then filters out rows with no K0 value because that means that K0 doesn't appear in that rule. Afterwards, joins the pathways and K0's together so each K0 has all pathways to which it's connected. Filter out pathways that we don't want, which means keeping only the ones in pathway_per_ok. Then group by rule_id, which counts the amount of different K0's that appeared in the same pathway and have the same rule_id. If there's a single pathway that all of its K0's exist in a single pathway, it's trivial - meaning we haven't discovered anything new but just rediscovered something that's already well documented. Otherwise, the rule is non-trivial to some extent, and additional research would need to be done to decide its importance.
+rules_test <- rules %>%
+  #seperate the vectors of K0's into different columns for each K0
+  separate(col = items, 
+           into = paste0("Temp", 1:(max(str_count(rules_found$items, pattern = ",") + 1))), 
+           sep = ",", fill = "right") %>%
+  #pivot longer into a dataframe with three columns - K0, rule_id, rule_size
+  pivot_longer(1:(max(str_count(rules_found$items, pattern = ",") + 1)), values_to = "K0") %>%
+  left_join(genome_per_ko_updated, by = c("K0" = "ko")) %>%
+  filter(!is.na(n_genome)) %>%
+  select(rule_id, rule_size ,K0) %>%
+  #filter out rows where there's no K0 which means that K0 doesnt exist in the original rule
+  filter(!is.na(K0)) 
+  #join the pathways to the K0's by K0
+  
+rules_test <- rules_test %>%
+  left_join(pathway_ko, by = c("K0" = "K0")) %>%
+  #remove pathways that we don't want (too big)
+  filter(pathway %in% pathway_per_ko$pathway)  %>%
+  #group by rule_id to count the instances of each different K0 in the same pathway
+  group_by(rule_id) %>%
+  summarize(n_K0 = n()) %>%
+  #group it again, and save only the max value as that's the only one relevant
+  group_by(rule_id) %>%
+  summarize(max_K0 = max(n_K0))
+#join rules and rules_test by rule_id 
+rules <- rules %>%
+  left_join(rules_test, by = "rule_id") 
+#replace any NA values (meaning that all K0's either aren't documented or exist only in irrelevant pathways)
+rules[is.na(rules)] <- 0
+#keep only rules that have a rule_size larger than max K0, meaning that it removes all rules that are completely "covered" by a pathway.
+message("Amount of rules before filtering out trivial rules: ", nrow(rules))
+rules <- rules %>% filter(rule_size > max_K0) %>%
+  left_join(rules_found, by = c("items" = "items"))
+message("Amount of rules after filtering out trivial rules: ", nrow(rules))
+rules_anl <- rules %>%
+  filter(str_detect(items, "K06409")) 
+nrow(rules_anl)
+a <- c("K06960", "K06409", "K03091")
+rules_anl <-  genome_kos [, a] 
+a <- unname(rowSums(rules_anl))
+a <- sapply(a, 
+            function(x){
+              if(x==3) {return(T)}
+              return(F)
+            }, USE.NAMES = F)
+rules_anl <- rules_anl[a]
+
+```
+We tried filtering out insignificant rules using p-values but all of our p-values were extremely low due to the high confidence rating and large dataset we used. One of our limitations was difficulty in filtering out rules that are irrelevant, as there's no one way to decide which rules are significant and which aren't (especially when we cannot assign p-values to them). Something that could greatly improve our results is if we'll find a way to filter out more of the rules, and be able to check only the really important rules instead of randomly go through thousands of rules.
+```{r}
+pvals_combined <- c()
+for (rid in 1:length(rules$rule_id)) {
+  message("Iteation number: ", rid)
+  K0s <- strsplit(as.character(rules[rid, 1]), split = ",")[[1]]
+  pvals_list <- c()
+  for (ko in K0s) {
+    other <- K0s[!K0s %in% ko]
+    K0s_cols <- genome_kos[,other]
+    is_ko <- genome_kos[, ko]
+    if(length(other) == 1) {
+      pval <- fisher.test(is_ko, K0s_cols)$p.value 
+    }
+    else {
+      kos_sum <- rowSums(K0s_cols)
+      is_kos <- unname(sapply(kos_sum, function(x) {x == length(other)}))
+      pval <- fisher.test(is_ko, is_kos)$p.value 
+    }
+    pvals_list <- (c(pvals_list, pval))
+  }
+  # Get a combined p value for this rule_id using Fisher's method (sum of logs)
+  pvals_combined <- (c(pvals_combined, fisher(pvals_list)$p))
+}
+pvals_combined <- p.adjust(pvals_combined)
+
+```
+
