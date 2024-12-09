@@ -9,7 +9,7 @@ School of Computer Science and Faculty of Medicine, Computational Metagenomics R
 This repository includes the code for the R script and R notebooks I used during my research under Dr. Muller. 
 
 To those interested, this is the paper itself:
-> [Mining association rules in KEGG orthologs of human gut bacteria](Alpha-Project/Final_Project_To_Upload.pdf)
+> [Mining association rules in KEGG orthologs of human gut bacteria](Final_Project_To_Upload.pdf)
 
 The goal of our research was two-pronged - provide a proof of concept to the effectiveness of using association rule mining to research the microbiome, and try to find interesting biological results with said association rules. 
 
